@@ -1,9 +1,7 @@
 use windows::core::*;
-use std::path::Path;
 use windows::Win32::System::Com::*;
 use windows::Win32::Graphics::Imaging::*;
 use windows::Win32::Foundation::GENERIC_WRITE;
-use std::ffi::c_void;
 use half::f16;
 
 pub fn save_as_jxr(path: &str, width: u32, height: u32, float_pixels: &[f32]) -> Result<()> {

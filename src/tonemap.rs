@@ -1,5 +1,19 @@
-// Removed tonemap_channel completely, relying on dynamic sdr_white inside the loop.
-/// Applies the standard sRGB transfer function.
+#[derive(Clone, Copy)]
+pub struct TonemapSettings {
+    pub reference_white: f32,
+    pub exposure: f32,
+}
+
+pub const PREVIEW_SETTINGS: TonemapSettings = TonemapSettings {
+    reference_white: 2.0,
+    exposure: 0.95,
+};
+
+pub const EXPORT_SETTINGS: TonemapSettings = TonemapSettings {
+    reference_white: 2.0,
+    exposure: 0.90,
+};
+
 #[inline]
 fn linear_to_srgb(c: f32) -> f32 {
     if c <= 0.0031308 {
@@ -9,56 +23,86 @@ fn linear_to_srgb(c: f32) -> f32 {
     }
 }
 
-/// Tone-map HDR float pixels (RGBA f32) to SDR u8 pixels (RGBA).
-///
-/// Pipeline: scRGB linear → ACES tone map → sRGB gamma → quantize to 0..255
-pub fn tonemap_to_srgb(pixels: &[f32], width: u32, height: u32, is_hdr: bool) -> Vec<u8> {
+#[inline]
+fn luminance(rgb: [f32; 3]) -> f32 {
+    0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+}
+
+#[inline]
+fn aces_film(x: f32) -> f32 {
+    let a = 2.51;
+    let b = 0.03;
+    let c = 2.43;
+    let d = 0.59;
+    let e = 0.14;
+    ((x * (a * x + b)) / (x * (c * x + d) + e)).clamp(0.0, 1.0)
+}
+
+fn tonemap_hdr_rgb(rgb: [f32; 3], settings: TonemapSettings) -> [f32; 3] {
+    let scaled = [
+        (rgb[0].max(0.0) / settings.reference_white) * settings.exposure,
+        (rgb[1].max(0.0) / settings.reference_white) * settings.exposure,
+        (rgb[2].max(0.0) / settings.reference_white) * settings.exposure,
+    ];
+
+    let scene_luma = luminance(scaled);
+    if scene_luma <= f32::EPSILON {
+        return [0.0, 0.0, 0.0];
+    }
+
+    // Compress highlights based on brightness, then rescale RGB to preserve hue.
+    let mapped_luma = aces_film(scene_luma);
+    let luma_scale = mapped_luma / scene_luma;
+    let mut mapped = [
+        scaled[0] * luma_scale,
+        scaled[1] * luma_scale,
+        scaled[2] * luma_scale,
+    ];
+
+    // Keep saturated highlights inside sRGB gamut instead of clipping to white.
+    let peak = mapped[0].max(mapped[1]).max(mapped[2]);
+    if peak > 1.0 {
+        let gamut_scale = 1.0 / peak;
+        mapped[0] *= gamut_scale;
+        mapped[1] *= gamut_scale;
+        mapped[2] *= gamut_scale;
+    }
+
+    mapped
+}
+
+pub fn tonemap_to_srgb(
+    pixels: &[f32],
+    width: u32,
+    height: u32,
+    is_hdr: bool,
+    settings: TonemapSettings,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity((width * height * 4) as usize);
-    let mut sdr_white_level = 2.0_f32;
 
     if is_hdr {
-        // Auto-detect SDR white level by finding the most common pure gray/white pixel > 1.0
-        let mut buckets = std::collections::HashMap::new();
-        for i in (0..pixels.len()).step_by(4) {
-            let r = pixels[i];
-            let g = pixels[i+1];
-            let b = pixels[i+2];
-            // Only examine pixels that are completely gray/white
-            if r >= 1.0 && (r - g).abs() < 0.005 && (r - b).abs() < 0.005 {
-                let bucket = (r * 100.0).round() as i32; 
-                *buckets.entry(bucket).or_insert(0) += 1;
-            }
-        }
-        
-        let mut max_count = 0;
-        for (bucket, count) in buckets {
-            if count > max_count && count > 50 { // min threshold to trust the bucket
-                max_count = count;
-                sdr_white_level = (bucket as f32) / 100.0;
-            }
-        }
-        sdr_white_level = sdr_white_level.clamp(1.0, 10.0);
-        println!("   [Color] Auto-detected SDR White Level: {}", sdr_white_level);
+        println!(
+            "   [Color] HDR->SDR reference white {:.2}, exposure {:.2}",
+            settings.reference_white, settings.exposure
+        );
     }
 
     for i in 0..(width * height) as usize {
         let base = i * 4;
-        let (r, g, b) = if is_hdr {
-            // HDR path: strict linear map to SDR white, no shoulder compression
-            // This perfectly guarantees exact same UI colors (light grays don't become white)
-            let r = linear_to_srgb((pixels[base] / sdr_white_level).clamp(0.0, 1.0));
-            let g = linear_to_srgb((pixels[base + 1] / sdr_white_level).clamp(0.0, 1.0));
-            let b = linear_to_srgb((pixels[base + 2] / sdr_white_level).clamp(0.0, 1.0));
-            (r, g, b)
+        let rgb = if is_hdr {
+            tonemap_hdr_rgb([pixels[base], pixels[base + 1], pixels[base + 2]], settings)
         } else {
-            // SDR path: data is already in [0,1] sRGB, pass through
-            (pixels[base], pixels[base + 1], pixels[base + 2])
+            [
+                pixels[base].clamp(0.0, 1.0),
+                pixels[base + 1].clamp(0.0, 1.0),
+                pixels[base + 2].clamp(0.0, 1.0),
+            ]
         };
 
-        out.push((r * 255.0).round().clamp(0.0, 255.0) as u8);
-        out.push((g * 255.0).round().clamp(0.0, 255.0) as u8);
-        out.push((b * 255.0).round().clamp(0.0, 255.0) as u8);
-        out.push(255u8); // Alpha: always fully opaque for screenshot
+        out.push((linear_to_srgb(rgb[0]).clamp(0.0, 1.0) * 255.0).round() as u8);
+        out.push((linear_to_srgb(rgb[1]).clamp(0.0, 1.0) * 255.0).round() as u8);
+        out.push((linear_to_srgb(rgb[2]).clamp(0.0, 1.0) * 255.0).round() as u8);
+        out.push(255u8);
     }
 
     out

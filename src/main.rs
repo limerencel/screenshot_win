@@ -38,11 +38,20 @@ fn take_screenshot(hdr_file_mode: bool) {
     };
     println!("   {}x{} {}", frame.width, frame.height, if frame.is_hdr { "HDR" } else { "SDR" });
 
-    // 2. Tone-map entire frame to sRGB (needed for overlay display)
-    let srgb = tonemap::tonemap_to_srgb(&frame.pixels, frame.width, frame.height, frame.is_hdr);
+    let preview_settings = capture_settings(&frame, tonemap::PREVIEW_SETTINGS);
+    let export_settings = capture_settings(&frame, tonemap::EXPORT_SETTINGS);
 
-    // 3. Show selection overlay on the tone-mapped image
-    let sel = overlay::show_selection(&srgb, frame.width, frame.height);
+    // 2. Build a preview image for the selection overlay.
+    let preview = tonemap::tonemap_to_srgb(
+        &frame.pixels,
+        frame.width,
+        frame.height,
+        frame.is_hdr,
+        preview_settings,
+    );
+
+    // 3. Show selection overlay on the preview image.
+    let sel = overlay::show_selection(&preview, frame.width, frame.height);
 
     match sel {
         Some(rect) => {
@@ -62,8 +71,15 @@ fn take_screenshot(hdr_file_mode: bool) {
                     Err(e) => eprintln!("❌ HDR save error: {:?}", e),
                 }
             } else {
-                // 4. Crop selected region (SDR)
-                let cropped = crop_rgba(&srgb, frame.width, &rect);
+                // 4. Re-run the SDR conversion on the selected raw pixels.
+                let cropped_f32 = crop_f32(&frame.pixels, frame.width, &rect);
+                let cropped = tonemap::tonemap_to_srgb(
+                    &cropped_f32,
+                    rect.w,
+                    rect.h,
+                    frame.is_hdr,
+                    export_settings,
+                );
 
                 let mut path = folder.clone();
                 path.push(format!("Screenshot_{}.png", timestamp));
@@ -98,14 +114,15 @@ fn crop_f32(pixels: &[f32], full_width: u32, rect: &overlay::SelectionRect) -> V
     out
 }
 
-fn crop_rgba(pixels: &[u8], full_width: u32, rect: &overlay::SelectionRect) -> Vec<u8> {
-    let mut out = Vec::with_capacity((rect.w * rect.h * 4) as usize);
-    for y in rect.y..(rect.y + rect.h) {
-        let row_start = (y * full_width + rect.x) as usize * 4;
-        let row_end = row_start + (rect.w as usize * 4);
-        out.extend_from_slice(&pixels[row_start..row_end]);
+fn capture_settings(frame: &capture::CapturedFrame, defaults: tonemap::TonemapSettings) -> tonemap::TonemapSettings {
+    if frame.is_hdr {
+        tonemap::TonemapSettings {
+            reference_white: frame.sdr_white_level.unwrap_or(defaults.reference_white),
+            exposure: defaults.exposure,
+        }
+    } else {
+        defaults
     }
-    out
 }
 
 fn main() {

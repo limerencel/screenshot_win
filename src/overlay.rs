@@ -111,7 +111,7 @@ pub fn show_selection(srgb_rgba: &[u8], width: u32, height: u32) -> Option<Selec
         // Message loop
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
-            TranslateMessage(&msg);
+            let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
 
@@ -145,7 +145,7 @@ pub fn show_selection(srgb_rgba: &[u8], width: u32, height: u32) -> Option<Selec
             *cell.borrow_mut() = None;
         });
         let _ = DestroyWindow(hwnd);
-        UnregisterClassW(class_name, Some((&hinstance).into()));
+        let _ = UnregisterClassW(class_name, Some((&hinstance).into()));
 
         result
     }
@@ -191,7 +191,7 @@ fn make_dimmed(bgra: &[u8]) -> Vec<u8> {
         .enumerate()
         .map(|(i, &v)| {
             if i % 4 == 3 { v } // keep alpha
-            else { (v as f32 * 0.35) as u8 } // dim RGB
+            else { ((v as f32 * 0.55).max(18.0)).round() as u8 } // dim RGB without collapsing dark scenes to black
         })
         .collect()
 }
@@ -221,7 +221,7 @@ unsafe extern "system" fn wnd_proc(
                     let old_bmp = SelectObject(mem_dc, mem_bmp);
 
                     // Draw dimmed background to off-screen buffer
-                    BitBlt(mem_dc, 0, 0, d.width, d.height, d.dc_dimmed, 0, 0, SRCCOPY);
+                    let _ = BitBlt(mem_dc, 0, 0, d.width, d.height, d.dc_dimmed, 0, 0, SRCCOPY);
 
                     if d.dragging || d.confirmed {
                         let l = d.start_x.min(d.cur_x);
@@ -232,12 +232,12 @@ unsafe extern "system" fn wnd_proc(
                         let sh = b - t;
                         if sw > 0 && sh > 0 {
                             // Bright original in selection area
-                            BitBlt(mem_dc, l, t, sw, sh, d.dc_original, l, t, SRCCOPY);
+                            let _ = BitBlt(mem_dc, l, t, sw, sh, d.dc_original, l, t, SRCCOPY);
                             // Border
                             let pen = CreatePen(PS_SOLID, 1, COLORREF(0x00D77800));
                             let old_pen = SelectObject(mem_dc, pen);
                             let old_brush = SelectObject(mem_dc, GetStockObject(NULL_BRUSH));
-                            Rectangle(mem_dc, l, t, r, b);
+                            let _ = Rectangle(mem_dc, l, t, r, b);
                             SelectObject(mem_dc, old_pen);
                             SelectObject(mem_dc, old_brush);
                             let _ = DeleteObject(pen);
@@ -245,7 +245,7 @@ unsafe extern "system" fn wnd_proc(
                     }
 
                     // Copy fully composed frame to screen
-                    BitBlt(hdc, 0, 0, d.width, d.height, mem_dc, 0, 0, SRCCOPY);
+                    let _ = BitBlt(hdc, 0, 0, d.width, d.height, mem_dc, 0, 0, SRCCOPY);
 
                     // Cleanup
                     SelectObject(mem_dc, old_bmp);

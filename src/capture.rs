@@ -1,4 +1,5 @@
 use windows::core::{Interface, Result};
+use windows::Win32::Devices::Display::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Direct3D::*;
 use windows::Win32::Graphics::Direct3D11::*;
@@ -10,6 +11,7 @@ pub struct CapturedFrame {
     pub height: u32,
     pub pixels: Vec<f32>,
     pub is_hdr: bool,
+    pub sdr_white_level: Option<f32>,
 }
 
 pub fn capture_screen() -> Result<CapturedFrame> {
@@ -35,6 +37,7 @@ pub fn capture_screen() -> Result<CapturedFrame> {
         let output: IDXGIOutput = adapter.EnumOutputs(0)?;
 
         let (duplication, is_hdr) = create_duplication(&output, &device)?;
+        let sdr_white_level = query_sdr_white_level(&output);
 
         // Acquire frame
         let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
@@ -100,7 +103,7 @@ pub fn capture_screen() -> Result<CapturedFrame> {
         context.Unmap(&dst_res, 0);
         duplication.ReleaseFrame().ok();
 
-        Ok(CapturedFrame { width, height, pixels, is_hdr })
+        Ok(CapturedFrame { width, height, pixels, is_hdr, sdr_white_level })
     }
 }
 
@@ -157,4 +160,107 @@ fn read_sdr(data: *const u8, pitch: u32, w: u32, h: u32) -> Vec<f32> {
         }
     }
     out
+}
+
+fn query_sdr_white_level(output: &IDXGIOutput) -> Option<f32> {
+    unsafe {
+        let output_desc = output.GetDesc().ok()?;
+        let gdi_name = utf16_to_string(&output_desc.DeviceName);
+        if gdi_name.is_empty() {
+            return None;
+        }
+
+        let path = find_display_path_for_gdi_name(&gdi_name)?;
+        let mut request = DISPLAYCONFIG_SDR_WHITE_LEVEL {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL,
+                size: std::mem::size_of::<DISPLAYCONFIG_SDR_WHITE_LEVEL>() as u32,
+                adapterId: path.targetInfo.adapterId,
+                id: path.targetInfo.id,
+            },
+            ..Default::default()
+        };
+
+        let status = DisplayConfigGetDeviceInfo(&mut request.header);
+        if status != 0 {
+            eprintln!(
+                "   [Color] Failed to query SDR white level for {} (error {})",
+                gdi_name, status
+            );
+            return None;
+        }
+
+        let reference_white = request.SDRWhiteLevel as f32 / 1000.0;
+        let white_nits = reference_white * 80.0;
+        println!(
+            "   [Color] System SDR white for {}: {:.1} nits ({:.3}x)",
+            gdi_name, white_nits, reference_white
+        );
+        Some(reference_white.max(1.0))
+    }
+}
+
+fn find_display_path_for_gdi_name(gdi_name: &str) -> Option<DISPLAYCONFIG_PATH_INFO> {
+    unsafe {
+        for _ in 0..3 {
+            let mut path_count = 0;
+            let mut mode_count = 0;
+            let status = GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut path_count, &mut mode_count);
+            if status != ERROR_SUCCESS {
+                return None;
+            }
+
+            let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); path_count as usize];
+            let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); mode_count as usize];
+            let status = QueryDisplayConfig(
+                QDC_ONLY_ACTIVE_PATHS,
+                &mut path_count,
+                paths.as_mut_ptr(),
+                &mut mode_count,
+                modes.as_mut_ptr(),
+                None,
+            );
+
+            if status == ERROR_INSUFFICIENT_BUFFER {
+                continue;
+            }
+            if status != ERROR_SUCCESS {
+                return None;
+            }
+
+            paths.truncate(path_count as usize);
+            for path in paths {
+                if source_device_name(&path) == Some(gdi_name.to_string()) {
+                    return Some(path);
+                }
+            }
+            return None;
+        }
+        None
+    }
+}
+
+fn source_device_name(path: &DISPLAYCONFIG_PATH_INFO) -> Option<String> {
+    unsafe {
+        let mut request = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                size: std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
+                adapterId: path.sourceInfo.adapterId,
+                id: path.sourceInfo.id,
+            },
+            ..Default::default()
+        };
+
+        let status = DisplayConfigGetDeviceInfo(&mut request.header);
+        if status != 0 {
+            return None;
+        }
+        Some(utf16_to_string(&request.viewGdiDeviceName))
+    }
+}
+
+fn utf16_to_string(buf: &[u16]) -> String {
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    String::from_utf16_lossy(&buf[..end])
 }
