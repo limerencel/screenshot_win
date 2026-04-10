@@ -45,6 +45,21 @@ It is closer to the Windows HDR desktop behavior than a naive global scale, but 
    - Drag to select a region
    - Right-click or press `Esc` to cancel
 
+4. **Screenshot location**
+   - This tool: `%USERPROFILE%\Pictures\Screenshots\`
+   - Files are named: `Screenshot_YYYYMMDD_HHMMSS.png` (SDR) or `Screenshot_HDR_YYYYMMDD_HHMMSS.jxr` (HDR)
+
+## Screenshot Storage on Windows
+
+| Tool / Shortcut | Storage Location |
+|-----------------|------------------|
+| **This tool** (`Ctrl+Alt+A/H`) | `%USERPROFILE%\Pictures\Screenshots\` |
+| **Win + Shift + S** (Snipping Tool) | Clipboard only (by default); recent versions can auto-save |
+| **Win + PrtScn** | `%USERPROFILE%\Pictures\Screenshots\` |
+| **PrtScn** | Clipboard only (no file saved) |
+| **Alt + PrtScn** | Clipboard only (active window, no file) |
+| **Xbox Game Bar** (`Win+G`) | `%USERPROFILE%\Videos\Captures\` (configurable) |
+
 ## Implementation Notes
 
 1. **Raw DXGI desktop capture**
