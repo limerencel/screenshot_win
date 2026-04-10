@@ -116,9 +116,11 @@ fn crop_f32(pixels: &[f32], full_width: u32, rect: &overlay::SelectionRect) -> V
 
 fn capture_settings(frame: &capture::CapturedFrame, defaults: tonemap::TonemapSettings) -> tonemap::TonemapSettings {
     if frame.is_hdr {
+        // Use the system's SDR white level to normalize boosted SDR content
+        // This ensures: boosted SDR (e.g., 2.0) → normalized to 1.0
+        // Then when viewed on same HDR monitor, Windows boosts it back to match visual appearance
         tonemap::TonemapSettings {
-            reference_white: frame.sdr_white_level.unwrap_or(defaults.reference_white),
-            exposure: defaults.exposure,
+            reference_white: frame.sdr_white_level.unwrap_or(1.0),
         }
     } else {
         defaults

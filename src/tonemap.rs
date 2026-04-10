@@ -1,17 +1,14 @@
 #[derive(Clone, Copy)]
 pub struct TonemapSettings {
     pub reference_white: f32,
-    pub exposure: f32,
 }
 
 pub const PREVIEW_SETTINGS: TonemapSettings = TonemapSettings {
-    reference_white: 2.0,
-    exposure: 0.95,
+    reference_white: 1.0,
 };
 
 pub const EXPORT_SETTINGS: TonemapSettings = TonemapSettings {
-    reference_white: 2.0,
-    exposure: 0.90,
+    reference_white: 1.0,
 };
 
 #[inline]
@@ -39,34 +36,44 @@ fn aces_film(x: f32) -> f32 {
 }
 
 fn tonemap_hdr_rgb(rgb: [f32; 3], settings: TonemapSettings) -> [f32; 3] {
-    let scaled = [
-        (rgb[0].max(0.0) / settings.reference_white) * settings.exposure,
-        (rgb[1].max(0.0) / settings.reference_white) * settings.exposure,
-        (rgb[2].max(0.0) / settings.reference_white) * settings.exposure,
+    // Normalize by reference_white (SDR boost level) to get "normal" SDR brightness
+    // This preserves what user sees: boosted SDR on HDR monitor → normal SDR in screenshot
+    let normalized = [
+        rgb[0].max(0.0) / settings.reference_white,
+        rgb[1].max(0.0) / settings.reference_white,
+        rgb[2].max(0.0) / settings.reference_white,
     ];
 
-    let scene_luma = luminance(scaled);
+    let scene_luma = luminance(normalized);
     if scene_luma <= f32::EPSILON {
         return [0.0, 0.0, 0.0];
     }
 
-    // Compress highlights based on brightness, then rescale RGB to preserve hue.
-    let mapped_luma = aces_film(scene_luma);
-    let luma_scale = mapped_luma / scene_luma;
-    let mut mapped = [
-        scaled[0] * luma_scale,
-        scaled[1] * luma_scale,
-        scaled[2] * luma_scale,
-    ];
+    // Only compress highlights (values > 1.0 after normalization, i.e., true HDR)
+    // For SDR content (luma <= 1.0), pass through unchanged to preserve exact appearance
+    let mapped = if scene_luma > 1.0 {
+        // Apply ACES tone mapping for HDR highlights
+        let mapped_luma = aces_film(scene_luma);
+        let luma_scale = mapped_luma / scene_luma;
+        let mut compressed = [
+            normalized[0] * luma_scale,
+            normalized[1] * luma_scale,
+            normalized[2] * luma_scale,
+        ];
 
-    // Keep saturated highlights inside sRGB gamut instead of clipping to white.
-    let peak = mapped[0].max(mapped[1]).max(mapped[2]);
-    if peak > 1.0 {
-        let gamut_scale = 1.0 / peak;
-        mapped[0] *= gamut_scale;
-        mapped[1] *= gamut_scale;
-        mapped[2] *= gamut_scale;
-    }
+        // Keep saturated highlights inside sRGB gamut
+        let peak = compressed[0].max(compressed[1]).max(compressed[2]);
+        if peak > 1.0 {
+            let gamut_scale = 1.0 / peak;
+            compressed[0] *= gamut_scale;
+            compressed[1] *= gamut_scale;
+            compressed[2] *= gamut_scale;
+        }
+        compressed
+    } else {
+        // SDR content: pass through unchanged (preserve exact visual match)
+        normalized
+    };
 
     mapped
 }
@@ -82,26 +89,31 @@ pub fn tonemap_to_srgb(
 
     if is_hdr {
         println!(
-            "   [Color] HDR->SDR reference white {:.2}, exposure {:.2}",
-            settings.reference_white, settings.exposure
+            "   [Color] HDR->SDR tone mapping (preserve visual appearance)"
+        );
+    } else {
+        println!(
+            "   [Color] SDR capture (direct sRGB, no gamma conversion)"
         );
     }
 
     for i in 0..(width * height) as usize {
         let base = i * 4;
-        let rgb = if is_hdr {
-            tonemap_hdr_rgb([pixels[base], pixels[base + 1], pixels[base + 2]], settings)
+        
+        if is_hdr {
+            // HDR input is linear scRGB (R16G16B16A16_FLOAT)
+            // Apply tone mapping to compress HDR range, then convert to sRGB
+            let rgb = tonemap_hdr_rgb([pixels[base], pixels[base + 1], pixels[base + 2]], settings);
+            out.push((linear_to_srgb(rgb[0]).clamp(0.0, 1.0) * 255.0).round() as u8);
+            out.push((linear_to_srgb(rgb[1]).clamp(0.0, 1.0) * 255.0).round() as u8);
+            out.push((linear_to_srgb(rgb[2]).clamp(0.0, 1.0) * 255.0).round() as u8);
         } else {
-            [
-                pixels[base].clamp(0.0, 1.0),
-                pixels[base + 1].clamp(0.0, 1.0),
-                pixels[base + 2].clamp(0.0, 1.0),
-            ]
-        };
-
-        out.push((linear_to_srgb(rgb[0]).clamp(0.0, 1.0) * 255.0).round() as u8);
-        out.push((linear_to_srgb(rgb[1]).clamp(0.0, 1.0) * 255.0).round() as u8);
-        out.push((linear_to_srgb(rgb[2]).clamp(0.0, 1.0) * 255.0).round() as u8);
+            // SDR input (B8G8R8A8_UNORM) is already sRGB encoded
+            // DO NOT apply linear_to_srgb - just output directly
+            out.push((pixels[base].clamp(0.0, 1.0) * 255.0).round() as u8);
+            out.push((pixels[base + 1].clamp(0.0, 1.0) * 255.0).round() as u8);
+            out.push((pixels[base + 2].clamp(0.0, 1.0) * 255.0).round() as u8);
+        }
         out.push(255u8);
     }
 
