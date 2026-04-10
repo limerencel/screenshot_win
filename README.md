@@ -127,6 +127,129 @@ Pass through directly (NO gamma conversion!)
 Output PNG
 ```
 
+## Deep Dive: How Windows HDR Screenshots Actually Work
+
+### Why Most Third-Party Tools Fail
+
+If you've tried ShareX, ScreenToGif, or other popular screenshot tools on an HDR display, you've likely noticed the washed-out, overexposed results. This isn't a bug in those tools—it's a **documentation gap** from Microsoft.
+
+#### The Documentation Problem
+
+Microsoft's official docs are **fragmented and incomplete**. The pieces exist separately, but nowhere does Microsoft explain how they connect:
+
+| What IS Documented | Where |
+|--------------------|-------|
+| `DISPLAYCONFIG_SDR_WHITE_LEVEL` structure | [wingdi.h docs](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-displayconfig_sdr_white_level) |
+| scRGB color space definition (linear, FP16, values >1.0 for HDR) | [HDR article](https://learn.microsoft.com/en-us/windows/win32/direct3darticles/high-dynamic-range) |
+| `R16G16B16A16_FLOAT` format for Advanced Color | Same HDR article |
+| `DuplicateOutput1` supports format specification | DXGI docs |
+
+| What's NOT Documented | Impact |
+|------------------------|--------|
+| **SDR boost is baked into scRGB values** | Developers don't know to normalize |
+| How to properly tone map for screenshots | Everyone invents their own (often wrong) |
+| Step-by-step "correct HDR capture" guide | Must piece together from 5+ separate docs |
+
+Even worse, some docs are **outdated or incorrect**:
+- Desktop Duplication API doc claims "format is always `B8G8R8A8_UNORM`" — but `DuplicateOutput1` on HDR displays actually gives `R16G16B16A16_FLOAT`
+- No mention that scRGB values for SDR content are pre-multiplied by the SDR white level
+
+#### The Double-Boost Problem
+
+Here's what happens with naive capture tools:
+
+```
+1. Capture scRGB framebuffer (SDR white already boosted to 2.0)
+2. Save to PNG directly (values remain at 2.0)
+3. View on HDR monitor → Windows sees "SDR content", boosts AGAIN
+   Result: 2.0 × 2.0 = 4.0 → double-boosted, washed out
+```
+
+Most developers never realize this because:
+- They assume captured values are "what the monitor shows"
+- They don't know about `DISPLAYCONFIG_SDR_WHITE_LEVEL`
+- Testing on HDR setups is niche
+
+### Why Xbox Game Bar and Chrome Work Correctly
+
+| Tool | Why It Works |
+|------|--------------|
+| **Xbox Game Bar** (Win+Shift+S) | Built by Microsoft with internal compositor knowledge. Has direct access to how DWM handles HDR/SDR mixing. |
+| **Chrome's circle-to-search** | Google uses `Windows.Graphics.Capture` or has implemented correct tone mapping with SDR boost awareness. |
+
+These tools from **platform vendors** work because they have:
+1. Internal knowledge of Windows HDR architecture
+2. Resources to test thoroughly on HDR setups
+3. Access to newer APIs (`Windows.Graphics.Capture`) that may handle some normalization automatically
+
+### Windows HDR Architecture Overview
+
+#### scRGB: The Hidden Color Space
+
+When "Advanced Color" (HDR) is enabled, the Desktop Window Manager (DWM) compositor uses **scRGB** as its internal color space:
+
+```
+scRGB definition:
+- BT.709/sRGB primaries
+- Linear gamma (no curve!)
+- IEEE FP16 (half precision)
+- Values can exceed [0, 1] range
+
+Examples:
+- scRGB (1.0, 1.0, 1.0) = 80 nits (standard SDR white)
+- scRGB (2.0, 2.0, 2.0) = 160 nits (boosted SDR white)
+- scRGB (12.5, 12.5, 12.5) = 1000 nits (HDR peak)
+```
+
+#### How SDR and HDR Content Mix
+
+```
+SDR app (browser, desktop)         HDR app (game, video)
+        │                                    │
+        ▼                                    ▼
+   80 nits output                    Native HDR output
+        │                                    │
+        ▼                                    │
+   SDR boost × 2.0                         │ (no boost)
+        │                                    │
+        ▼                                    ▼
+   scRGB (2.0, 2.0, 2.0)              scRGB (12.5, 12.5, 12.5)
+        │                                    │
+        └────────────────────────────────────┘
+                         │
+                         ▼
+                 DWM Compositor (scRGB)
+                         │
+                         ▼
+              Display Output (HDR monitor)
+```
+
+**Key insight**: The scRGB framebuffer contains both boosted SDR and native HDR values mixed together. You can't tell which is which without querying the SDR white level.
+
+#### Capture API Evolution
+
+| API | Format | HDR Support | Notes |
+|-----|--------|-------------|-------|
+| GDI / BitBlt | B8G8R8A8_UNORM | ❌ No | Legacy, always 8-bit sRGB |
+| `IDXGIOutput1::DuplicateOutput` | B8G8R8A8_UNORM | ❌ No | No format control |
+| `IDXGIOutput5::DuplicateOutput1` | R16G16B16A16_FLOAT | ✅ Yes | Can request FP16 scRGB |
+| `Windows.Graphics.Capture` | Configurable | ✅ Yes | Modern API, may auto-normalize |
+
+### What This Tool Does Differently
+
+1. **Uses `DuplicateOutput1`** to capture native scRGB (FP16) when available
+2. **Queries `DISPLAYCONFIG_SDR_WHITE_LEVEL`** to get the boost factor
+3. **Normalizes SDR content** by dividing by boost factor
+4. **Only tone-maps true HDR** (values >1.0 after normalization)
+5. **Correct gamma handling**: linear→sRGB for HDR, direct pass for SDR fallback
+
+### References
+
+- [DISPLAYCONFIG_SDR_WHITE_LEVEL](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-displayconfig_sdr_white_level)
+- [High Dynamic Range Display Support](https://learn.microsoft.com/en-us/windows/win32/direct3darticles/high-dynamic-range)
+- [Desktop Duplication API](https://learn.microsoft.com/en-us/windows/win32/direct3ddxgi/desktop-dup-api) (note: format info is outdated)
+- [IDXGIOutput5::DuplicateOutput1](https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_5/nf-dxgi1_5-idxgioutput5-duplicateoutput1)
+
 ## Current Limitations
 
 - SDR output is improved, but still not a perfect match for Xbox Game Bar in every scene.
